@@ -5,7 +5,7 @@ mod state;
 
 use clap::Parser;
 use cli::{Cli, Command};
-use state::{AppState, detect_transition};
+use state::{detect_transition, load_state, save_state};
 
 fn main() {
     let cli = Cli::parse();
@@ -15,11 +15,20 @@ fn main() {
             drop(password);
         }
         Command::Check => {
-            let _state: Option<AppState> = None;
-            let _transition = detect_transition(None, state::PresenceStatus::CheckedIn);
-            let _ = _transition;
-            if let Some(s) = _state {
-                let _ = s.effective_last_status(chrono::Local::now().date_naive());
+            let path = match state::default_state_path() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return;
+                }
+            };
+            let app_state = load_state(&path).ok();
+            let effective = app_state
+                .as_ref()
+                .and_then(|s| s.effective_last_status(chrono::Local::now().date_naive()));
+            let _transition = detect_transition(effective, state::PresenceStatus::CheckedIn);
+            if let Some(s) = app_state {
+                let _ = save_state(&path, &s);
             }
             println!("Check");
         }

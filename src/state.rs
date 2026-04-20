@@ -1,5 +1,40 @@
+use std::path::{Path, PathBuf};
+
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt, Snafu};
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(display("failed to determine state directory"))]
+    StateDir,
+
+    #[snafu(display("failed to create state directory at {}", path.display()))]
+    CreateDir {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("failed to read state file at {}", path.display()))]
+    ReadState {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("failed to write state file at {}", path.display()))]
+    WriteState {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("failed to parse state file"))]
+    ParseState { source: serde_json::Error },
+
+    #[snafu(display("failed to serialize state"))]
+    SerializeState { source: serde_json::Error },
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +68,34 @@ impl AppState {
             _ => ::core::option::Option::None,
         }
     }
+}
+
+/// Returns the default path for the state file: `~/.local/state/hortpro/state.json`
+pub fn default_state_path() -> Result<PathBuf> {
+    let base = dirs::state_dir().context(StateDirSnafu)?;
+    Ok(base.join("hortpro").join("state.json"))
+}
+
+/// Loads the application state from the given path.
+pub fn load_state(path: &Path) -> Result<AppState> {
+    let content = std::fs::read_to_string(path).context(ReadStateSnafu {
+        path: path.to_path_buf(),
+    })?;
+    serde_json::from_str(&content).context(ParseStateSnafu)
+}
+
+/// Saves the application state to the given path, creating parent directories as needed.
+pub fn save_state(path: &Path, state: &AppState) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context(CreateDirSnafu {
+            path: parent.to_path_buf(),
+        })?;
+    }
+    let content = serde_json::to_string_pretty(state).context(SerializeStateSnafu)?;
+    std::fs::write(path, content).context(WriteStateSnafu {
+        path: path.to_path_buf(),
+    })?;
+    Ok(())
 }
 
 /// Determines the notification transition between two statuses.
@@ -154,5 +217,31 @@ mod tests {
             state.effective_last_status(today),
             ::core::option::Option::None
         );
+    }
+
+    #[test]
+    fn test_state_round_trip() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("state.json");
+
+        let state = AppState {
+            session_cookie: "Fe26.2**abc123".to_string(),
+            kid_id: "872d5140-3b20-498d-9e79-858e05788c48".to_string(),
+            kid_name: "TestKid".to_string(),
+            last_status: Some(PresenceStatus::CheckedIn),
+            last_status_date: Some(date(2026, 4, 20)),
+            last_check_at: ::core::option::Option::None,
+        };
+
+        save_state(&path, &state)?;
+        let loaded = load_state(&path)?;
+        assert_eq!(state, loaded);
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_missing_file_returns_error() {
+        let result = load_state(Path::new("/tmp/nonexistent-hortpro-test/state.json"));
+        assert!(result.is_err());
     }
 }
