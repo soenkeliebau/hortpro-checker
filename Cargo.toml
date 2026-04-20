@@ -1,6 +1,16 @@
 [package]
-name = "HortProChecker"
+name = "hortpro-checker"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = { version = "0.4.44", features = ["serde"] }
+clap = { version = "4.6.1", features = ["derive"] }
+dirs = "6.0.0"
+reqwest = { version = "0.13.2", features = ["blocking", "json", "cookies"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+snafu = "0.9.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
