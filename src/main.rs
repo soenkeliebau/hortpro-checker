@@ -61,11 +61,14 @@ fn run_check() -> i32 {
 
 fn do_login(email: &str, password: &str) -> Result<()> {
     let client = api::build_client().context(ApiSnafu)?;
-    let (session_cookie, _login_data) = api::login(&client, email, password).context(ApiSnafu)?;
+    let (session_cookie, login_data) = api::login(&client, email, password).context(ApiSnafu)?;
     let kid = api::fetch_first_kid(&client, &session_cookie).context(ApiSnafu)?;
 
     let group_display = kid.kid_group.as_deref().unwrap_or("unknown group");
-    println!("Logged in. Child: {} ({})", kid.firstname, group_display);
+    println!(
+        "Logged in as {} {}. Child: {} ({})",
+        login_data.firstname, login_data.lastname, kid.firstname, group_display
+    );
 
     let app_state = state::AppState {
         session_cookie,
