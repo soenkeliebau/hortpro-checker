@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, NaiveDate};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt, Snafu};
+use tracing::{debug, trace};
 
 use crate::state::PresenceStatus;
 
@@ -20,6 +23,9 @@ pub enum Error {
     #[snafu(display("failed to parse response body"))]
     ParseResponse { source: reqwest::Error },
 
+    #[snafu(display("failed to parse response JSON: {source}"))]
+    ParseStaticResponse { source: serde_json::Error },
+
     #[snafu(display("API returned success: false"))]
     ApiUnsuccessful,
 
@@ -37,6 +43,9 @@ pub enum Error {
 
     #[snafu(display("unexpected HTTP status: {status}"))]
     UnexpectedStatus { status: u16 },
+
+    #[snafu(display("failed to parse base URL"))]
+    ParseBaseUrl,
 }
 
 /// A specialized `Result` type for API operations.
@@ -60,8 +69,10 @@ pub struct LoginData {
 #[derive(Debug, Deserialize)]
 pub struct Kid {
     pub id: String,
+    #[serde(rename = "first_name")]
     pub firstname: String,
     pub kid_group: Option<String>,
+    pub picture: Option<String>,
 }
 
 /// Paginated presences wrapper.
@@ -80,15 +91,44 @@ pub struct PresenceRecord {
 const BASE_URL: &str = "https://elternportal.hortpro.de";
 const CLIENT_VERSION: &str = "1.14.1";
 
-/// Builds a reqwest blocking client with the `client-version` header pre-configured.
-pub fn build_client() -> Result<Client> {
+fn default_headers() -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "client-version",
         reqwest::header::HeaderValue::from_static(CLIENT_VERSION),
     );
+    headers
+}
+
+/// Builds a reqwest client with a shared cookie jar.
+///
+/// Returns both the client and the jar so callers can read captured cookies
+/// (e.g. to persist the session cookie after login).
+pub fn build_client() -> Result<(Client, Arc<reqwest::cookie::Jar>)> {
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    let client = reqwest::blocking::Client::builder()
+        .default_headers(default_headers())
+        .cookie_provider(Arc::clone(&jar))
+        .build()
+        .context(RequestSnafu)?;
+    Ok((client, jar))
+}
+
+/// Builds a client with pre-seeded cookies in its jar.
+///
+/// `cookies` is a `Cookie` header string like `"sid-hep=…; did-hep=…"`.
+/// Each cookie is added individually so the jar sends them all automatically.
+pub fn build_authenticated_client(cookies: &str) -> Result<Client> {
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    let base_url: reqwest::Url = BASE_URL.parse().ok().context(ParseBaseUrlSnafu)?;
+    for cookie in cookies.split("; ") {
+        debug!(%cookie, "pre-seeding jar");
+        jar.add_cookie_str(cookie, &base_url);
+    }
+
     reqwest::blocking::Client::builder()
-        .default_headers(headers)
+        .default_headers(default_headers())
+        .cookie_provider(jar)
         .build()
         .context(RequestSnafu)
 }
@@ -113,10 +153,14 @@ fn extract_data<T>(response: ApiResponse<T>) -> Result<T> {
     response.data.context(MissingDataSnafu)
 }
 
-/// Authenticates with the HortPro API. Returns the session cookie value and user data.
-pub fn login(client: &Client, email: &str, password: &str) -> Result<(String, LoginData)> {
+/// Authenticates with the HortPro API.
+///
+/// The session cookie is captured automatically by the client's cookie jar.
+/// Use [`extract_session_cookie`] to read it back for persistence.
+pub fn login(client: &Client, email: &str, password: &str) -> Result<LoginData> {
     let timestamp = chrono::Utc::now().timestamp_millis();
     let url = format!("{BASE_URL}/api/user/login?_dc={timestamp}");
+    debug!(%url, "POST login");
 
     let response = client
         .post(&url)
@@ -128,55 +172,80 @@ pub fn login(client: &Client, email: &str, password: &str) -> Result<(String, Lo
         .send()
         .context(RequestSnafu)?;
 
-    let session_cookie = response
-        .cookies()
-        .find(|c| c.name() == "sid-hep")
-        .map(|c| c.value().to_string())
-        .context(NoSessionCookieSnafu)?;
+    let status = response.status();
+    debug!(%status, "login response");
+    for (name, value) in response.headers() {
+        trace!(
+            header_name = %name,
+            header_value = value.to_str().unwrap_or("<non-ascii>"),
+            "login response header"
+        );
+    }
 
-    let body: ApiResponse<LoginData> = response.json().context(ParseResponseSnafu)?;
-    let data = extract_data(body)?;
+    let body_text = response.text().context(ParseResponseSnafu)?;
+    debug!(body = %body_text, "login response body");
 
-    Ok((session_cookie, data))
+    let body: ApiResponse<LoginData> =
+        serde_json::from_str(&body_text).context(ParseStaticResponseSnafu)?;
+    extract_data(body)
+}
+
+/// Reads all cookies from the jar as a `Cookie` header string (e.g. `sid-hep=…; did-hep=…`).
+///
+/// The server requires both `sid-hep` and `did-hep` for authenticated requests.
+pub fn extract_cookies(jar: &reqwest::cookie::Jar) -> Result<String> {
+    use reqwest::cookie::CookieStore;
+    let base_url: reqwest::Url = BASE_URL.parse().ok().context(ParseBaseUrlSnafu)?;
+    let cookies = jar.cookies(&base_url);
+    debug!(
+        jar_cookies = cookies
+            .as_ref()
+            .map(|c| c.to_str().unwrap_or("<non-ascii>")),
+        %base_url,
+        "reading cookies from jar"
+    );
+    let cookies = cookies.context(NoSessionCookieSnafu)?;
+    let cookies_str = cookies.to_str().map_err(|_| NoSessionCookieSnafu.build())?;
+    Ok(cookies_str.to_string())
 }
 
 /// Fetches the list of kids and returns the first one.
-pub fn fetch_first_kid(client: &Client, session_cookie: &str) -> Result<Kid> {
+pub fn fetch_first_kid(client: &Client) -> Result<Kid> {
     let url = format!("{BASE_URL}/api/kids");
+    debug!(%url, "GET kids");
 
-    let response = client
-        .get(&url)
-        .header("Cookie", format!("sid-hep={session_cookie}"))
-        .send()
-        .context(RequestSnafu)?;
+    let response = client.get(&url).send().context(RequestSnafu)?;
 
     let status = response.status();
+    debug!(%status, "kids response");
     check_auth_status(status)?;
 
-    let body: ApiResponse<Vec<Kid>> = response.json().context(ParseResponseSnafu)?;
+    let body_text = response.text().context(ParseResponseSnafu)?;
+    debug!(body = %body_text, "kids response body");
+
+    let body: ApiResponse<Vec<Kid>> =
+        serde_json::from_str(&body_text).context(ParseStaticResponseSnafu)?;
     let kids = extract_data(body)?;
 
     kids.into_iter().next().context(NoKidsSnafu)
 }
 
 /// Fetches the most recent presence record for a kid.
-pub fn fetch_presences(
-    client: &Client,
-    session_cookie: &str,
-    kid_id: &str,
-) -> Result<Vec<PresenceRecord>> {
+pub fn fetch_presences(client: &Client, kid_id: &str) -> Result<Vec<PresenceRecord>> {
     let url = format!("{BASE_URL}/api/kids/{kid_id}/presences?start=0&limit=1");
+    debug!(%url, "GET presences");
 
-    let response = client
-        .get(&url)
-        .header("Cookie", format!("sid-hep={session_cookie}"))
-        .send()
-        .context(RequestSnafu)?;
+    let response = client.get(&url).send().context(RequestSnafu)?;
 
     let status = response.status();
+    debug!(%status, "presences response");
     check_auth_status(status)?;
 
-    let body: ApiResponse<PresencesData> = response.json().context(ParseResponseSnafu)?;
+    let body_text = response.text().context(ParseResponseSnafu)?;
+    debug!(body = %body_text, "presences response body");
+
+    let body: ApiResponse<PresencesData> =
+        serde_json::from_str(&body_text).context(ParseStaticResponseSnafu)?;
     let data = extract_data(body)?;
 
     Ok(data.rows)
@@ -267,8 +336,8 @@ mod tests {
             "data": [
                 {
                     "id": "872d5140-3b20-498d-9e79-858e05788c48",
-                    "firstname": "TestKid",
-                    "lastname": "Doe",
+                    "first_name": "TestKid",
+                    "last_name": "Doe",
                     "kid_group": "Eisbaeren",
                     "extra_field": "ignored"
                 }

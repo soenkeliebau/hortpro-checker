@@ -12,14 +12,14 @@ pub struct Cli {
 /// Available subcommands for the HortPro checker
 #[derive(Subcommand)]
 pub enum Command {
-    /// Authenticate and store session
+    /// Authenticate and store session (prompts interactively if not provided)
     Login {
         /// Account email address
         #[arg(long)]
-        email: String,
+        email: Option<String>,
         /// Account password
         #[arg(long)]
-        password: String,
+        password: Option<String>,
     },
     /// Check current attendance status
     Check,

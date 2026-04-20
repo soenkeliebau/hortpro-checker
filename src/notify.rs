@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 use snafu::{ResultExt, Snafu};
@@ -33,20 +34,22 @@ impl Urgency {
 
 /// Builds the `notify-send` command without executing it.
 #[must_use]
-pub fn build_command(summary: &str, body: &str, urgency: Urgency) -> Command {
+pub fn build_command(summary: &str, body: &str, urgency: Urgency, icon: Option<&Path>) -> Command {
     let mut cmd = Command::new("notify-send");
     cmd.arg("--urgency")
         .arg(urgency.as_str())
         .arg("--app-name")
-        .arg("HortProChecker")
-        .arg(summary)
-        .arg(body);
+        .arg("HortProChecker");
+    if let Some(icon_path) = icon {
+        cmd.arg("--icon").arg(icon_path);
+    }
+    cmd.arg(summary).arg(body);
     cmd
 }
 
 /// Sends a desktop notification via `notify-send`.
-pub fn send(summary: &str, body: &str, urgency: Urgency) -> Result<()> {
-    let status = build_command(summary, body, urgency)
+pub fn send(summary: &str, body: &str, urgency: Urgency, icon: Option<&Path>) -> Result<()> {
+    let status = build_command(summary, body, urgency, icon)
         .status()
         .context(ExecuteSnafu)?;
     if !status.success() {
@@ -66,7 +69,7 @@ mod tests {
 
     #[test]
     fn test_build_command_normal() {
-        let cmd = build_command("HortProChecker", "Kid arrived", Urgency::Normal);
+        let cmd = build_command("HortProChecker", "Kid arrived", Urgency::Normal, None);
         assert_eq!(cmd.get_program(), "notify-send");
         let args: Vec<&OsStr> = cmd.get_args().collect();
         assert_eq!(
@@ -83,8 +86,32 @@ mod tests {
     }
 
     #[test]
+    fn test_build_command_with_icon() {
+        let cmd = build_command(
+            "HortProChecker",
+            "Kid arrived",
+            Urgency::Normal,
+            Some(Path::new("/tmp/photo.jpg")),
+        );
+        let args: Vec<&OsStr> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "--urgency",
+                "normal",
+                "--app-name",
+                "HortProChecker",
+                "--icon",
+                "/tmp/photo.jpg",
+                "HortProChecker",
+                "Kid arrived",
+            ]
+        );
+    }
+
+    #[test]
     fn test_build_command_critical() {
-        let cmd = build_command("Error", "something broke", Urgency::Critical);
+        let cmd = build_command("Error", "something broke", Urgency::Critical, None);
         let args: Vec<&OsStr> = cmd.get_args().collect();
         assert_eq!(args[1], "critical");
     }

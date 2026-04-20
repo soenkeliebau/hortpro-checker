@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu};
@@ -33,6 +34,18 @@ pub enum Error {
 
     #[snafu(display("failed to serialize state"))]
     SerializeState { source: serde_json::Error },
+
+    #[snafu(display("failed to decode photo from base64"))]
+    DecodePhoto { source: base64::DecodeError },
+
+    #[snafu(display("failed to write photo to {}", path.display()))]
+    WritePhoto {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("photo data URI has no base64 payload"))]
+    PhotoNoPayload,
 }
 
 /// A specialized `Result` type for state operations.
@@ -79,6 +92,32 @@ impl AppState {
 pub fn default_state_path() -> Result<PathBuf> {
     let base = dirs::state_dir().context(StateDirSnafu)?;
     Ok(base.join("hortpro").join("state.json"))
+}
+
+/// Returns the default path for the kid photo: `~/.local/state/hortpro/photo.jpg`
+pub fn default_photo_path() -> Result<PathBuf> {
+    let base = dirs::state_dir().context(StateDirSnafu)?;
+    Ok(base.join("hortpro").join("photo.jpg"))
+}
+
+/// Decodes a `data:image/jpeg;base64,...` URI and writes the image to disk.
+pub fn save_photo(data_uri: &str, path: &Path) -> Result<()> {
+    let payload = data_uri
+        .split_once(",")
+        .map(|(_, b)| b)
+        .context(PhotoNoPayloadSnafu)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .context(DecodePhotoSnafu)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context(CreateDirSnafu {
+            path: parent.to_path_buf(),
+        })?;
+    }
+    std::fs::write(path, bytes).context(WritePhotoSnafu {
+        path: path.to_path_buf(),
+    })?;
+    Ok(())
 }
 
 /// Loads the application state from the given path.
