@@ -1,6 +1,7 @@
 use chrono::{DateTime, NaiveDate};
+use reqwest::blocking::Client;
 use serde::Deserialize;
-use snafu::{OptionExt, ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu};
 
 use crate::state::PresenceStatus;
 
@@ -74,64 +75,109 @@ pub struct PresenceRecord {
     pub date_end: Option<String>,
 }
 
-/// Sends a POST request and deserialises the JSON body into an `ApiResponse<T>`.
-///
-/// This is the shared HTTP helper used by all API calls. It maps `reqwest::Error`
-/// into the typed `Request` and `ParseResponse` error variants.
-fn post_json<T: serde::de::DeserializeOwned>(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    body: &serde_json::Value,
-) -> Result<ApiResponse<T>> {
-    let response = client.post(url).json(body).send().context(RequestSnafu)?;
-    response
-        .json::<ApiResponse<T>>()
-        .context(ParseResponseSnafu)
+const BASE_URL: &str = "https://elternportal.hortpro.de";
+const CLIENT_VERSION: &str = "1.14.1";
+
+/// Builds a reqwest blocking client with the `client-version` header pre-configured.
+pub fn build_client() -> Result<Client> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "client-version",
+        reqwest::header::HeaderValue::from_static(CLIENT_VERSION),
+    );
+    reqwest::blocking::Client::builder()
+        .default_headers(headers)
+        .build()
+        .context(RequestSnafu)
 }
 
-/// Logs in with the given credentials and returns the parsed `LoginData`.
-///
-/// Full implementation in Task 7 will read `data.firstname`, `data.lastname`,
-/// and the session cookie from the response.
-pub fn login(email: &str, password: &str) -> Result<LoginData> {
-    let client = reqwest::blocking::Client::new();
-    let body = serde_json::json!({ "email": email, "password": password });
-    let response = post_json::<LoginData>(&client, "http://invalid.placeholder/login", &body)?;
-    ensure!(response.success, ApiUnsuccessfulSnafu);
-    let data = response.data.context(MissingDataSnafu)?;
-    // Read fields to satisfy dead-code lint until Task 7 wires up real credential handling.
-    let _ = (&data.firstname, &data.lastname);
-    Ok(data)
+fn check_auth_status(status: reqwest::StatusCode) -> Result<()> {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return SessionExpiredSnafu.fail();
+    }
+    if !status.is_success() {
+        return UnexpectedStatusSnafu {
+            status: status.as_u16(),
+        }
+        .fail();
+    }
+    Ok(())
 }
 
-/// Fetches the first kid for the logged-in account.
-///
-/// Full implementation in Task 7 will call `GET /api/kids` and return the first kid's
-/// `id`, `firstname`, and `kid_group`.
-pub fn fetch_first_kid(session: &str) -> Result<Kid> {
-    let client = reqwest::blocking::Client::new();
-    let body = serde_json::json!({ "session": session });
-    let response = post_json::<Vec<Kid>>(&client, "http://invalid.placeholder/kids", &body)?;
-    let mut kids = response.data.context(MissingDataSnafu)?;
-    let kid = kids.drain(..).next().context(NoKidsSnafu)?;
-    // Read fields to satisfy dead-code lint until Task 7 wires up real kid selection.
-    let _ = (&kid.id, &kid.firstname, &kid.kid_group);
-    Ok(kid)
+fn extract_data<T>(response: ApiResponse<T>) -> Result<T> {
+    if !response.success {
+        return ApiUnsuccessfulSnafu.fail();
+    }
+    response.data.context(MissingDataSnafu)
 }
 
-/// Fetches the presence records for the given kid.
-///
-/// Full implementation in Task 7 will call `GET /api/presences` and return a
-/// `PresencesData` with the `rows` of presence records.
-pub fn fetch_presences(session: &str, kid_id: &str) -> Result<PresencesData> {
-    let client = reqwest::blocking::Client::new();
-    let body = serde_json::json!({ "session": session, "kid_id": kid_id });
-    let response =
-        post_json::<PresencesData>(&client, "http://invalid.placeholder/presences", &body)?;
-    let data = response.data.context(MissingDataSnafu)?;
-    // Read field to satisfy dead-code lint until Task 7 wires up real presence handling.
-    let _ = &data.rows;
-    Ok(data)
+/// Authenticates with the HortPro API. Returns the session cookie value and user data.
+pub fn login(client: &Client, email: &str, password: &str) -> Result<(String, LoginData)> {
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    let url = format!("{BASE_URL}/api/user/login?_dc={timestamp}");
+
+    let response = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "email": email,
+            "password": password,
+            "keepSession": false
+        }))
+        .send()
+        .context(RequestSnafu)?;
+
+    let session_cookie = response
+        .cookies()
+        .find(|c| c.name() == "sid-hep")
+        .map(|c| c.value().to_string())
+        .context(NoSessionCookieSnafu)?;
+
+    let body: ApiResponse<LoginData> = response.json().context(ParseResponseSnafu)?;
+    let data = extract_data(body)?;
+
+    Ok((session_cookie, data))
+}
+
+/// Fetches the list of kids and returns the first one.
+pub fn fetch_first_kid(client: &Client, session_cookie: &str) -> Result<Kid> {
+    let url = format!("{BASE_URL}/api/kids");
+
+    let response = client
+        .get(&url)
+        .header("Cookie", format!("sid-hep={session_cookie}"))
+        .send()
+        .context(RequestSnafu)?;
+
+    let status = response.status();
+    check_auth_status(status)?;
+
+    let body: ApiResponse<Vec<Kid>> = response.json().context(ParseResponseSnafu)?;
+    let kids = extract_data(body)?;
+
+    kids.into_iter().next().context(NoKidsSnafu)
+}
+
+/// Fetches the most recent presence record for a kid.
+pub fn fetch_presences(
+    client: &Client,
+    session_cookie: &str,
+    kid_id: &str,
+) -> Result<Vec<PresenceRecord>> {
+    let url = format!("{BASE_URL}/api/kids/{kid_id}/presences?start=0&limit=1");
+
+    let response = client
+        .get(&url)
+        .header("Cookie", format!("sid-hep={session_cookie}"))
+        .send()
+        .context(RequestSnafu)?;
+
+    let status = response.status();
+    check_auth_status(status)?;
+
+    let body: ApiResponse<PresencesData> = response.json().context(ParseResponseSnafu)?;
+    let data = extract_data(body)?;
+
+    Ok(data.rows)
 }
 
 /// Determines the current presence status from the most recent presence record.
