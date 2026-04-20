@@ -5,6 +5,7 @@ mod state;
 
 use clap::Parser;
 use cli::{Cli, Command};
+use notify::Urgency;
 use state::{detect_transition, load_state, save_state};
 
 fn main() {
@@ -18,6 +19,7 @@ fn main() {
             let path = match state::default_state_path() {
                 Ok(p) => p,
                 Err(e) => {
+                    let _ = notify::send("HortProChecker", &e.to_string(), Urgency::Critical);
                     eprintln!("error: {e}");
                     return;
                 }
@@ -30,6 +32,7 @@ fn main() {
             if let Some(s) = app_state {
                 let _ = save_state(&path, &s);
             }
+            let _ = notify::send("HortProChecker", "Check complete", Urgency::Normal);
             println!("Check");
         }
     }
