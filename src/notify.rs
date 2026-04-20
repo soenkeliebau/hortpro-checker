@@ -2,6 +2,7 @@ use std::process::Command;
 
 use snafu::{ResultExt, Snafu};
 
+/// Errors that can occur when sending desktop notifications.
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("failed to execute notify-send"))]
@@ -11,6 +12,7 @@ pub enum Error {
     NonZeroExit { status: i32 },
 }
 
+/// A specialized `Result` type for notification operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Urgency level for desktop notifications.

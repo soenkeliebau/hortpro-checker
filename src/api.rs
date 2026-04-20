@@ -5,6 +5,7 @@ use snafu::{OptionExt, ResultExt, Snafu};
 
 use crate::state::PresenceStatus;
 
+/// Errors that can occur during API interactions.
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("failed to parse presence date: {value}"))]
@@ -38,6 +39,7 @@ pub enum Error {
     UnexpectedStatus { status: u16 },
 }
 
+/// A specialized `Result` type for API operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Wrapper for all API responses.
@@ -187,7 +189,7 @@ pub fn fetch_presences(
 pub fn determine_status(records: &[PresenceRecord], today: NaiveDate) -> Result<PresenceStatus> {
     let record = match records.first() {
         Some(r) => r,
-        ::core::option::Option::None => return Ok(PresenceStatus::CheckedOut),
+        None => return Ok(PresenceStatus::CheckedOut),
     };
 
     if record.date_end.is_some() {

@@ -4,6 +4,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, Snafu};
 
+/// Errors that can occur during state file operations.
 #[derive(Debug, Snafu)]
 pub enum Error {
     #[snafu(display("failed to determine state directory"))]
@@ -34,8 +35,10 @@ pub enum Error {
     SerializeState { source: serde_json::Error },
 }
 
+/// A specialized `Result` type for state operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// Whether the child is currently at daycare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PresenceStatus {
@@ -43,6 +46,7 @@ pub enum PresenceStatus {
     CheckedOut,
 }
 
+/// The type of status change detected between two checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transition {
     Arrived,
@@ -50,6 +54,7 @@ pub enum Transition {
     None,
 }
 
+/// Persisted application state, stored as JSON between runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppState {
     pub session_cookie: String,
@@ -65,7 +70,7 @@ impl AppState {
     pub fn effective_last_status(&self, today: NaiveDate) -> Option<PresenceStatus> {
         match self.last_status_date {
             Some(date) if date == today => self.last_status,
-            _ => ::core::option::Option::None,
+            _ => None,
         }
     }
 }
@@ -105,7 +110,7 @@ pub fn detect_transition(
     current: PresenceStatus,
 ) -> Transition {
     match (effective_previous, current) {
-        (::core::option::Option::None, PresenceStatus::CheckedIn) => Transition::Arrived,
+        (None, PresenceStatus::CheckedIn) => Transition::Arrived,
         (Some(PresenceStatus::CheckedOut), PresenceStatus::CheckedIn) => Transition::Arrived,
         (Some(PresenceStatus::CheckedIn), PresenceStatus::CheckedOut) => Transition::Left,
         _ => Transition::None,
@@ -240,8 +245,8 @@ mod tests {
     }
 
     #[test]
-    fn test_load_missing_file_returns_error() {
+    fn test_load_missing_file_returns_read_error() {
         let result = load_state(Path::new("/tmp/nonexistent-hortpro-test/state.json"));
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::ReadState { .. })));
     }
 }
