@@ -50,7 +50,9 @@ pub struct ApiResponse<T> {
 /// User data returned from the login endpoint.
 #[derive(Debug, Deserialize)]
 pub struct LoginData {
+    #[allow(dead_code)]
     pub firstname: String,
+    #[allow(dead_code)]
     pub lastname: String,
 }
 
