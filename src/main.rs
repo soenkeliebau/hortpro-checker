@@ -13,6 +13,8 @@ fn main() {
     match cli.command {
         Command::Login { email, password } => {
             println!("Login: {email}");
+            // Stub calls — full HTTP wiring in Task 7/8.
+            let _ = api::login(&email, &password);
             drop(password);
         }
         Command::Check => {
@@ -28,6 +30,10 @@ fn main() {
             let effective = app_state
                 .as_ref()
                 .and_then(|s| s.effective_last_status(chrono::Local::now().date_naive()));
+            // Stub calls — full HTTP wiring in Task 7/8.
+            let _ = api::fetch_first_kid("");
+            let _ = api::fetch_presences("", "");
+            let _status = api::determine_status(&[], chrono::Local::now().date_naive()).ok();
             let _transition = detect_transition(effective, state::PresenceStatus::CheckedIn);
             if let Some(s) = app_state {
                 let _ = save_state(&path, &s);
